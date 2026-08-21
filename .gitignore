@@ -1,0 +1,15 @@
+# Arduino / PlatformIO build products
+build/
+.pio/
+*.bin
+*.elf
+*.map
+
+# Local recordings can be large and may contain field metadata
+data/
+
+# Editor and OS files
+.idea/
+.vscode/
+*~
+.DS_Store
