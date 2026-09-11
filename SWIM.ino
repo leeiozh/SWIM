@@ -127,14 +127,15 @@ void setup() {
   if (!imuWire.begin(SwimConfig::I2C_SDA, SwimConfig::I2C_SCL, 100000))
     haltWithError("I2C ERROR", "Wire.begin failed");
   delay(200);
-  if (!imu.begin(imuWire)) haltWithError("MPU ERROR", "Expected WHO_AM_I=0x70");
+  if (!imu.begin(imuWire)) haltWithError("IMU ERROR", "Check scan / WHO_AM_I in Serial");
 
   display.showBoot("GNSS");
   gnss.begin(gpsSerial, SwimConfig::GPS_RX_PIN, SwimConfig::GPS_TX_PIN,
              SwimConfig::GPS_BAUD);
+  gnss.configureFiveHz();
 
   // A failed logger does not stop measurements; the display reports NO LOG.
-  display.showBoot("LOGGER / FFat");
+  display.showBoot("LOGGER / microSD");
   logger.setWaveBufferSize(waves.bufferSize());
   logger.begin();
   display.showBoot("WIFI OFF");
@@ -145,12 +146,15 @@ void setup() {
   display.draw(waves, gnss, logger, wifi);
 
   Serial.println("SWIM modular logger started");
-  Serial.printf("IMU I2C: SDA=GPIO%d SCL=GPIO%d address=0x%02X\n",
+  Serial.printf("IMU I2C: SDA=GPIO%d SCL=GPIO%d address=0x%02X model=%s\n",
                 SwimConfig::I2C_SDA, SwimConfig::I2C_SCL,
-                SwimConfig::MPU_ADDRESS);
+                imu.address(), imu.modelName());
   Serial.printf("GPS UART: GPS TX -> GPIO%d, GPS RX <- GPIO%d, %lu baud\n",
                 SwimConfig::GPS_RX_PIN, SwimConfig::GPS_TX_PIN,
                 (unsigned long)SwimConfig::GPS_BAUD);
+  Serial.printf("microSD SPI: CS=%d SCK=%d MISO=%d MOSI=%d\n",
+                SwimConfig::SD_CS, SwimConfig::SD_SCK,
+                SwimConfig::SD_MISO, SwimConfig::SD_MOSI);
   Serial.printf("IMU %.0f Hz, wave %.0f Hz, buffer %d samples\n",
                 SwimConfig::IMU_RATE_HZ, SwimConfig::WAVE_RATE_HZ,
                 waves.bufferSize());
@@ -282,8 +286,6 @@ void loop() {
   }
 
   const GnssData &g = gnss.data();
-  if (!gnss.powerSaveEnabled() && g.fixValid && g.timeValid)
-    gnss.enableMinutePowerSave();
   if (logger.ok() && g.timeValid && !logger.utcNamed() &&
       millis() - lastUtcNameAttemptMs >= 5000) {
     lastUtcNameAttemptMs = millis();

@@ -1,6 +1,6 @@
 #include "WifiPortal.h"
 #include <DNSServer.h>
-#include <FFat.h>
+#include <SD.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include "DataLogger.h"
@@ -45,7 +45,7 @@ bool WifiPortal::toggle() { if (active_) stop(); else start(); return active_; }
 void WifiPortal::update() { if (active_) { dns_->processNextRequest(); server_->handleClient(); } }
 
 String WifiPortal::mainPage() const {
-  String html(FPSTR(PAGE_HEAD)); File root = FFat.open("/"); File file = root ? root.openNextFile() : File(); bool found = false;
+  String html(FPSTR(PAGE_HEAD)); File root = SD.open("/"); File file = root ? root.openNextFile() : File(); bool found = false;
   while (file) {
     String name = file.name(); if (!name.startsWith("/")) name = "/" + name;
     if (!file.isDirectory() && name.endsWith(".bin")) {
@@ -62,7 +62,7 @@ String WifiPortal::mainPage() const {
 void WifiPortal::sendLogFile() {
   String name = server_->arg("name"); if (!validLogName(name)) { server_->send(400, "text/plain", "Invalid log name"); return; }
   if (logger_ && name == logger_->fileName()) logger_->flush();
-  File file = FFat.open(name, FILE_READ); if (!file || file.isDirectory()) { server_->send(404, "text/plain", "Log not found"); return; }
+  File file = SD.open(name, FILE_READ); if (!file || file.isDirectory()) { server_->send(404, "text/plain", "Log not found"); return; }
   server_->sendHeader("Content-Disposition", "attachment; filename=\"" + name.substring(1) + "\""); server_->streamFile(file, "application/octet-stream"); file.close();
 }
 bool WifiPortal::selectedFiles(String *names, int &count) const {
@@ -89,7 +89,7 @@ void WifiPortal::sendCombinedCsv() {
   server_->sendContent(csvHeader);
   uint8_t payload[256]; char line[384];
   for (int n = 0; n < count; ++n) {
-    File file = FFat.open(names[n], FILE_READ); if (!file || file.size() < 44) continue; file.seek(44);
+    File file = SD.open(names[n], FILE_READ); if (!file || file.size() < 44) continue; file.seek(44);
     while (file.available() >= (int)sizeof(RecordHeader)) {
       RecordHeader r; if (file.read((uint8_t *)&r, sizeof(r)) != sizeof(r) || r.payloadSize > sizeof(payload) || file.read(payload, r.payloadSize) != r.payloadSize) break;
       int length = 0;
@@ -125,6 +125,6 @@ void WifiPortal::sendCombinedCsv() {
 }
 void WifiPortal::deleteSelected() {
   String names[32]; int count=0; if (!selectedFiles(names,count)) { server_->send(400,"text/plain","No files selected"); return; }
-  int deleted=0,refused=0; for(int i=0;i<count;++i){ if(logger_&&names[i]==logger_->fileName()){refused++;continue;} if(FFat.remove(names[i]))deleted++; }
+  int deleted=0,refused=0; for(int i=0;i<count;++i){ if(logger_&&names[i]==logger_->fileName()){refused++;continue;} if(SD.remove(names[i]))deleted++; }
   String html="<html><meta name='viewport' content='width=device-width'><body><h2>Deleted "; html+=deleted; html+=" file(s)</h2>"; if(refused)html+="<p>The active log was protected.</p>"; html+="<p><a href='/'>Back</a></p></body></html>"; server_->send(200,"text/html",html);
 }

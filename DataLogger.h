@@ -17,7 +17,7 @@ class DataLogger {
     STORAGE_FULL,
   };
 
-  /// Mounts FFat and prepares the logger without creating a session file.
+  /// Mounts the SPI microSD and prepares the logger without creating a session file.
   bool begin();
   /// Stores the active wave-window size for the next file header.
   void setWaveBufferSize(uint32_t samples) { waveBufferSize_ = samples; }
@@ -44,7 +44,7 @@ class DataLogger {
   Status status() const { return status_; }
   /// Returns a compact display label for the logger state.
   const char *statusText() const;
-  /// Returns the FFat capacity captured at mount time.
+  /// Returns the microSD capacity captured at mount time.
   size_t totalBytes() const { return totalBytes_; }
   /// Returns the latest measured free-space percentage.
   uint8_t freePercent() const;

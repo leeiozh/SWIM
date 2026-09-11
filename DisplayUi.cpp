@@ -381,11 +381,7 @@ void DisplayUi::drawGnssPage(const GnssReceiver &gnss) {
   gfx_->fillScreen(C_BLACK);
   gfx_->setTextSize(2); gfx_->setTextColor(C_CYAN); gfx_->setCursor(8, 8);
   gfx_->println("GNSS");
-  if (gnss.powerSaveEnabled()) {
-    gfx_->setTextSize(1); gfx_->setTextColor(g.uartAlive ? C_GREEN : C_YELLOW);
-    gfx_->setCursor(7, 29); gfx_->print(g.uartAlive ? "GNSS ACTIVE" : "GNSS SLEEP");
-  }
-  if (!g.uartAlive && !gnss.powerSaveEnabled()) {
+  if (!g.uartAlive) {
     const bool neverReceivedData = g.totalBytes == 0;
     const bool startupGraceExpired = millis() >= 15000UL;
     gfx_->setTextSize(2);

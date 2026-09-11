@@ -13,10 +13,8 @@ class GnssReceiver {
   const GnssData &data() const { return data_; }
   /// Estimates UTC for a monotonic ESP timer timestamp.
   uint64_t estimatedUtcMs(uint64_t monotonicUs) const;
-  /// Requests the u-blox minute power-save schedule.
-  bool enableMinutePowerSave();
-  /// Reports whether the power-save command was sent successfully.
-  bool powerSaveEnabled() const { return powerSaveEnabled_; }
+  /// Requests a 200 ms navigation period (approximately 5 Hz).
+  bool configureFiveHz();
 
  private:
   /// Validates the checksum of one NMEA sentence.
@@ -45,5 +43,5 @@ class GnssReceiver {
   uint32_t gsvWindowStartedMs_ = 0;
   uint8_t gsvWindowVisible_ = 0;
   uint8_t gsvWindowBestCn0_ = 0;
-  bool powerSaveEnabled_ = false;
+  bool fiveHzConfigured_ = false;
 };

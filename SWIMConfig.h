@@ -4,7 +4,7 @@
 
 namespace SwimConfig {
 
-// Runtime-selectable acquisition windows. TEST is ~82 s at 50 Hz; FIELD is
+// Runtime-selectable acquisition windows. TEST is ~82 s at 100 Hz; FIELD is
 // 10 minutes. Buffers are allocated once for the larger mode in PSRAM.
 constexpr bool DEFAULT_TEST_MODE = true;
 
@@ -33,33 +33,29 @@ constexpr float BATTERY_BASE_CORRECTION_V = 0.20f;
 constexpr float BATTERY_GNSS_ACTIVE_CORRECTION_V = 0.04f;
 constexpr float BATTERY_WIFI_ACTIVE_CORRECTION_V = 0.05f;
 
-// GY-91 / MPU-6500
-// The assembled instrument is operated and zeroed vertically: physical MPU
+// Dedicated IMU I2C bus. Both supported modules have SA0/AD0 tied low.
+// The assembled instrument is operated and zeroed vertically: physical IMU
 // +X reads approximately +1 g when stationary. ImuSensor maps that +X to the
 // earth/instrument vertical before attitude and wave calculations.
 constexpr bool VERTICAL_INSTALLATION = true;
-// On-board 4-pin Qwiic/STEMMA connector (I2C, not SPI).
-// Four-pin connector marked 43/44 beside USB:
-// black = SDA -> GPIO43, red = SCL -> GPIO44,
-// blue = GND, yellow = 3V3.
-constexpr int I2C_SDA = 43;
-constexpr int I2C_SCL = 44;
-constexpr uint8_t MPU_ADDRESS = 0x68;
-constexpr float IMU_RATE_HZ = 50.0f;
-constexpr uint32_t IMU_PERIOD_US = 20000UL;
+constexpr int I2C_SDA = 1;
+constexpr int I2C_SCL = 2;
+constexpr uint8_t IMU_ADDRESS_LOW = 0x68;
+constexpr uint8_t IMU_ADDRESS_HIGH = 0x69;
+constexpr float IMU_RATE_HZ = 100.0f;
+constexpr uint32_t IMU_PERIOD_US = 10000UL;
 
-// GY-GPS6MU2 / u-blox M10 UART.
-// GPS TX -> GPIO1 (ESP RX), GPS RX <- GPIO2 (ESP TX).
-constexpr int GPS_RX_PIN = 1;
-constexpr int GPS_TX_PIN = 2;
+// GY-GPS6MV2 / u-blox NEO-M8N UART.
+constexpr int GPS_RX_PIN = 18;  // ESP RX <- GPS TX
+constexpr int GPS_TX_PIN = 17;  // ESP TX -> GPS RX
 constexpr uint32_t GPS_BAUD = 9600;
 
-// Wave processing retains the previous 100 -> 50 Hz decimation.
-constexpr float WAVE_RATE_HZ = 50.0f;
+// Wave processing consumes every IMU sample directly at 100 Hz; no decimation.
+constexpr float WAVE_RATE_HZ = 100.0f;
 constexpr int FFT_SIZE = 4096;
 constexpr int FFT_STEP = FFT_SIZE / 2;
-constexpr int TEST_WAVE_BUFFER_SIZE = 4096;
-constexpr int FIELD_WAVE_BUFFER_SIZE = 30000;
+constexpr int TEST_WAVE_BUFFER_SIZE = 8192;
+constexpr int FIELD_WAVE_BUFFER_SIZE = 60000;
 constexpr int MAX_WAVE_BUFFER_SIZE = FIELD_WAVE_BUFFER_SIZE;
 constexpr uint32_t TEST_WAVE_UPDATE_MS = 20000UL;
 constexpr uint32_t FIELD_WAVE_UPDATE_MS = 60000UL;
@@ -73,6 +69,12 @@ constexpr uint32_t SUMMARY_LOG_INTERVAL_MS = 60000UL;
 constexpr uint32_t BUTTON_MULTI_CLICK_MS = 900UL;
 constexpr uint32_t MODE_SWITCH_HOLD_MS = 3000UL;
 constexpr uint32_t CPU_FREQUENCY_MHZ = 80;
+
+// External microSD breakout in SPI mode.
+constexpr int SD_CS = 10;
+constexpr int SD_SCK = 11;
+constexpr int SD_MISO = 12;
+constexpr int SD_MOSI = 13;
 
 // Event codes stored in the binary journal and exported by swim_log_to_csv.py.
 constexpr uint32_t EVENT_MARK = 1;

@@ -1,7 +1,7 @@
 #include "DataLogger.h"
 
-#include <FFat.h>
-#include <Preferences.h>
+#include <SD.h>
+#include <SPI.h>
 #include <string.h>
 #include <time.h>
 #include "SWIMConfig.h"
@@ -46,7 +46,7 @@ static_assert(sizeof(FileHeader) == 44, "Unexpected SWIM file header layout");
 static_assert(sizeof(RecordHeader) == 20, "Unexpected SWIM record header layout");
 static_assert(sizeof(SummaryPayload) == 212, "Unexpected summary payload layout");
 
-/// Normalizes an FFat entry name to an absolute path.
+/// Normalizes an SD entry name to an absolute path.
 String normalizedPath(const char *name) {
   String path = name ? String(name) : String();
   if (!path.startsWith("/")) path = "/" + path;
@@ -55,33 +55,18 @@ String normalizedPath(const char *name) {
 
 /// Checks for an exact path without creating a placeholder file.
 bool listedPathExists(const String &wanted) {
-  File root = FFat.open("/");
-  for (File entry = root ? root.openNextFile() : File(); entry;
-       entry = root.openNextFile()) {
-    if (normalizedPath(entry.name()) == wanted) return true;
-  }
-  return false;
+  return SD.exists(wanted);
 }
 }  // namespace
 
 bool DataLogger::begin() {
-  // Format a new FAT partition once, but never auto-format a previously used
-  // partition after corruption: preserving field logs is more important.
-  Preferences preferences;
-  preferences.begin("swim", false);
-  const bool wasInitialized = preferences.getBool("ffat_init", false);
-  bool mounted = FFat.begin(false);
-  if (!mounted && !wasInitialized) {
-    mounted = FFat.format(false) && FFat.begin(false);
-  }
-  if (!mounted) {
-    preferences.end();
+  SPI.begin(SwimConfig::SD_SCK, SwimConfig::SD_MISO,
+            SwimConfig::SD_MOSI, SwimConfig::SD_CS);
+  if (!SD.begin(SwimConfig::SD_CS)) {
     status_ = Status::MOUNT_FAILED;
-    Serial.println("LOGGER: FFat mount failed. Check 16 MB flash + 3MB APP/9.9MB FATFS; if the partition scheme changed, erase flash once to clear stale NVS/format state.");
+    Serial.println("LOGGER: microSD mount failed; check card, 3.3 V and CS/SCK/MISO/MOSI wiring");
     return false;
   }
-  preferences.putBool("ffat_init", true);
-  preferences.end();
 
   // A previous experimental allocator could leave thousands of zero-byte
   // placeholders while probing numeric names. They contain no header or data
@@ -90,7 +75,7 @@ bool DataLogger::begin() {
   while (true) {
     String stale[16];
     int staleCount = 0;
-    File cleanupRoot = FFat.open("/");
+    File cleanupRoot = SD.open("/");
     for (File entry = cleanupRoot ? cleanupRoot.openNextFile() : File();
          entry && staleCount < 16; entry = cleanupRoot.openNextFile()) {
       const String path = normalizedPath(entry.name());
@@ -100,15 +85,15 @@ bool DataLogger::begin() {
     cleanupRoot.close();
     if (!staleCount) break;
     for (int i = 0; i < staleCount; ++i) {
-      if (FFat.remove(stale[i])) emptyLogsRemoved++;
+      if (SD.remove(stale[i])) emptyLogsRemoved++;
       delay(0);
     }
   }
   if (emptyLogsRemoved)
     Serial.printf("LOGGER: removed %d empty stale log files\n", emptyLogsRemoved);
 
-  totalBytes_ = FFat.totalBytes();
-  freeBytes_ = FFat.freeBytes();
+  totalBytes_ = SD.totalBytes();
+  freeBytes_ = totalBytes_ > SD.usedBytes() ? totalBytes_ - SD.usedBytes() : 0;
   status_ = Status::WAITING_DATA;
   strncpy(fileName_, "waiting", sizeof(fileName_) - 1);
   return true;
@@ -145,7 +130,7 @@ bool DataLogger::startSession(uint64_t utcMs) {
   if (!utcNamed_) {
     int highestNumericIndex = -1;
     uint8_t usedNumeric[1250] = {};
-    File root = FFat.open("/");
+    File root = SD.open("/");
     for (File entry = root ? root.openNextFile() : File(); entry;
          entry = root.openNextFile()) {
       String name = normalizedPath(entry.name());
@@ -179,7 +164,7 @@ bool DataLogger::startSession(uint64_t utcMs) {
     snprintf(fileName_, sizeof(fileName_), "/%04d.bin", nextIndex);
   }
 
-  file_ = FFat.open(fileName_, FILE_WRITE);
+  file_ = SD.open(fileName_, FILE_WRITE);
   if (!file_) {
     status_ = Status::OPEN_FAILED;
     Serial.printf("LOGGER: cannot open %s for writing\n", fileName_);
@@ -269,9 +254,9 @@ bool DataLogger::applyUtcFileName(uint64_t utcMs) {
   if (!flush()) return false;
   const String oldName(fileName_);
   file_.close();
-  if (!FFat.rename(oldName, target)) {
+  if (!SD.rename(oldName, target)) {
     Serial.printf("LOGGER: rename %s failed; starting new UTC file\n", oldName.c_str());
-    file_ = FFat.open(target, FILE_WRITE);
+    file_ = SD.open(target, FILE_WRITE);
     if (file_ && writeFileHeader()) {
       file_.flush();
       strncpy(fileName_, target.c_str(), sizeof(fileName_) - 1);
@@ -281,12 +266,12 @@ bool DataLogger::applyUtcFileName(uint64_t utcMs) {
       return true;
     }
     file_.close();
-    file_ = FFat.open(oldName, FILE_APPEND);
+    file_ = SD.open(oldName, FILE_APPEND);
     status_ = file_ ? Status::OK : Status::OPEN_FAILED;
     ready_ = (bool)file_;
     return false;
   }
-  file_ = FFat.open(target, FILE_APPEND);
+  file_ = SD.open(target, FILE_APPEND);
   if (!file_) {
     status_ = Status::OPEN_FAILED;
     ready_ = false;
@@ -319,7 +304,7 @@ bool DataLogger::flushBuffer() {
   if (!bufferedBytes_) return true;
   if (file_.write(writeBuffer_, bufferedBytes_) != bufferedBytes_) {
     ready_ = false;
-    freeBytes_ = FFat.freeBytes();
+    freeBytes_ = totalBytes_ > SD.usedBytes() ? totalBytes_ - SD.usedBytes() : 0;
     status_ = freeBytes_ <= SwimConfig::STORAGE_STOP_FREE_BYTES
                   ? Status::STORAGE_FULL : Status::WRITE_FAILED;
     Serial.println("LOGGER: buffered write failed");
@@ -378,7 +363,7 @@ void DataLogger::update() {
 
 void DataLogger::checkStorage() {
   if (!ok()) return;
-  freeBytes_ = FFat.freeBytes();
+  freeBytes_ = totalBytes_ > SD.usedBytes() ? totalBytes_ - SD.usedBytes() : 0;
   if (freeBytes_ <= SwimConfig::STORAGE_STOP_FREE_BYTES) {
     flushBuffer();
     file_.flush();

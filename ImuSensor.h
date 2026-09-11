@@ -6,12 +6,14 @@
 
 class ImuSensor {
  public:
-  /// Initializes and validates the MPU-6500 on the supplied I2C bus.
+  /// Scans the bus, identifies and initializes a supported IMU.
   bool begin(TwoWire &wire);
   /// Reads one calibrated sample and computes level-frame acceleration.
   bool read(ImuSample &sample, uint64_t monotonicUs);
-  /// Reads the MPU identity register.
+  /// Reads the detected device identity register.
   uint8_t whoAmI();
+  const char *modelName() const;
+  uint8_t address() const { return address_; }
   /// Re-estimates gyro bias and installation attitude while stationary.
   bool calibrateStationary();
 
@@ -20,12 +22,17 @@ class ImuSensor {
   bool writeRegister(uint8_t reg, uint8_t value);
   /// Reads a contiguous MPU register block.
   bool readRegisters(uint8_t reg, uint8_t *buffer, size_t length);
+  bool beginMpu6500();
+  bool beginIcm42688();
   /// Updates roll and pitch with a complementary filter.
   void updateAttitude(ImuSample &sample, float dt);
   /// Rotates acceleration into the level frame and removes gravity.
   void calculateLevelAcceleration(ImuSample &sample);
 
   TwoWire *wire_ = nullptr;
+  enum class Model : uint8_t { NONE, MPU6500, ICM42688 };
+  Model model_ = Model::NONE;
+  uint8_t address_ = 0;
   float roll_ = 0;
   float pitch_ = 0;
   float zeroRoll_ = 0;

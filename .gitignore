@@ -13,3 +13,13 @@ data/
 .vscode/
 *~
 .DS_Store
+
+# Python caches and reproducible document render scratch
+__pycache__/
+*.py[cod]
+tmp/
+
+# Python caches and reproducible document render scratch
+__pycache__/
+*.py[cod]
+tmp/

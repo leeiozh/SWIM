@@ -59,42 +59,15 @@ bool GnssReceiver::sendUbx(uint8_t messageClass, uint8_t messageId,
   return written == sizeof(header) + payloadLength + sizeof(checksum);
 }
 
-bool GnssReceiver::enableMinutePowerSave() {
-  if (powerSaveEnabled_) return true;
-
-  // u-blox M10 SPG 5.10: UBX-CFG-VALSET, RAM + battery-backed RAM layers.
-  // PSMOO clears ordinary RAM whenever it enters its inactive state, so BBR is
-  // required to retain this schedule across successive sleep/wake cycles.
-  // Flash is deliberately not written. PSM ON/OFF wakes every 60 s on the
-  // GPS-week grid, offset to second 45. It tracks for 10 s after a valid fix,
-  // providing a fresh fix shortly before SWIM stores its HH:MM:00 summary.
-  uint8_t payload[64] = {0x00, 0x03, 0x00, 0x00};
-  size_t length = 4;
-  auto key = [&](uint32_t id) {
-    for (int i = 0; i < 4; ++i) payload[length++] = (uint8_t)(id >> (8 * i));
-  };
-  auto u1 = [&](uint32_t id, uint8_t value) { key(id); payload[length++] = value; };
-  auto u2 = [&](uint32_t id, uint16_t value) {
-    key(id); payload[length++] = (uint8_t)value; payload[length++] = (uint8_t)(value >> 8);
-  };
-  auto u4 = [&](uint32_t id, uint32_t value) {
-    key(id); for (int i = 0; i < 4; ++i) payload[length++] = (uint8_t)(value >> (8 * i));
-  };
-
-  u4(0x40D00002, 60);  // CFG-PM-POSUPDATEPERIOD, seconds
-  u4(0x40D00003, 60);  // CFG-PM-ACQPERIOD, seconds
-  u4(0x40D00004, 45);  // CFG-PM-GRIDOFFSET: wake near each minute's :45
-  u2(0x30D00005, 10);  // CFG-PM-ONTIME, seconds
-  u1(0x20D00006, 5);   // CFG-PM-MINACQTIME, seconds
-  u1(0x20D00007, 15);  // CFG-PM-MAXACQTIME, seconds
-  u1(0x10D00009, 0);   // Wait for a normal position fix, not merely time fix
-  u1(0x10D0000A, 1);   // CFG-PM-UPDATEEPH
-  u1(0x20D00001, 1);   // CFG-PM-OPERATEMODE = PSMOO (apply last)
-
-  if (!sendUbx(0x06, 0x8A, payload, (uint16_t)length)) return false;
-  powerSaveEnabled_ = true;
-  Serial.println("GNSS: u-blox M10 minute power save requested (RAM+BBR, wake at :45)");
-  return true;
+bool GnssReceiver::configureFiveHz() {
+  if (fiveHzConfigured_) return true;
+  // UBX-CFG-RATE: 200 ms measurement period, one navigation solution per
+  // measurement, UTC time reference. This packet is supported by NEO-M8N.
+  const uint8_t payload[] = {0xC8, 0x00, 0x01, 0x00, 0x00, 0x00};
+  fiveHzConfigured_ = sendUbx(0x06, 0x08, payload, sizeof(payload));
+  Serial.println(fiveHzConfigured_ ? "GNSS: 5 Hz navigation rate requested"
+                                   : "GNSS: failed to request 5 Hz rate");
+  return fiveHzConfigured_;
 }
 
 bool GnssReceiver::checksumValid(const char *line) const {
