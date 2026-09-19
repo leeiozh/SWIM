@@ -10,19 +10,33 @@ constexpr int HALF = N / 2;
 constexpr float DF = SwimConfig::WAVE_RATE_HZ / N;
 }
 
-float WaveAnalyzer::fftReal_[N];
-float WaveAnalyzer::fftImag_[N];
-float WaveAnalyzer::elevationSpectrum_[HALF];
-float WaveAnalyzer::a1_[HALF];
-float WaveAnalyzer::b1_[HALF];
-
 bool WaveAnalyzer::begin() {
   waveAx_ = (float *)ps_malloc(SwimConfig::MAX_WAVE_BUFFER_SIZE * sizeof(float));
   waveAy_ = (float *)ps_malloc(SwimConfig::MAX_WAVE_BUFFER_SIZE * sizeof(float));
   waveAz_ = (float *)ps_malloc(SwimConfig::MAX_WAVE_BUFFER_SIZE * sizeof(float));
+  roll_ = (float *)ps_malloc(SwimConfig::MAX_WAVE_BUFFER_SIZE * sizeof(float));
+  pitch_ = (float *)ps_malloc(SwimConfig::MAX_WAVE_BUFFER_SIZE * sizeof(float));
+  fftReal_ = (float *)ps_malloc(N * sizeof(float));
+  fftImag_ = (float *)ps_malloc(N * sizeof(float));
+  elevationSpectrum_ = (float *)ps_malloc(HALF * sizeof(float));
+  a1_ = (float *)ps_malloc(HALF * sizeof(float));
+  b1_ = (float *)ps_malloc(HALF * sizeof(float));
   a2_ = (float *)ps_malloc(HALF * sizeof(float));
   b2_ = (float *)ps_malloc(HALF * sizeof(float));
-  return waveAx_ && waveAy_ && waveAz_ && a2_ && b2_;
+  float **workspaces[] = {&sxx_, &syy_, &szz_, &cxy_, &qzx_, &qzy_,
+                          &xr_, &xi_, &yr_, &yi_, &zr_, &zi_};
+  for (float **workspace : workspaces)
+    *workspace = (float *)ps_malloc(HALF * sizeof(float));
+  const bool allocated = waveAx_ && waveAy_ && waveAz_ && roll_ && pitch_ &&
+                         fftReal_ && fftImag_ && elevationSpectrum_ && a1_ &&
+                         b1_ && a2_ && b2_ && sxx_ && syy_ && szz_ && cxy_ &&
+                         qzx_ && qzy_ && xr_ && xi_ && yr_ && yi_ && zr_ && zi_;
+  if (allocated) {
+    memset(elevationSpectrum_, 0, HALF * sizeof(float));
+    memset(a1_, 0, HALF * sizeof(float)); memset(b1_, 0, HALF * sizeof(float));
+    memset(a2_, 0, HALF * sizeof(float)); memset(b2_, 0, HALF * sizeof(float));
+  }
+  return allocated;
 }
 
 int WaveAnalyzer::bufferSize() const {
@@ -35,11 +49,14 @@ uint32_t WaveAnalyzer::updateIntervalMs() const {
                    : SwimConfig::FIELD_WAVE_UPDATE_MS;
 }
 
-void WaveAnalyzer::addImuSample(float x, float y, float z) {
+void WaveAnalyzer::addImuSample(float x, float y, float z,
+                                float rollRad, float pitchRad) {
   if (!waveAx_) return;
   waveAx_[writeIndex_] = x;
   waveAy_[writeIndex_] = y;
   waveAz_[writeIndex_] = z;
+  roll_[writeIndex_] = rollRad;
+  pitch_[writeIndex_] = pitchRad;
   writeIndex_ = (writeIndex_ + 1) % bufferSize();
   if (samplesCollected_ < bufferSize()) samplesCollected_++;
   results_.sampleCount = samplesCollected_;
@@ -54,8 +71,8 @@ void WaveAnalyzer::reset() {
   samplesCollected_ = 0;
   results_ = WaveResults();
   resultGeneration_++;
-  memset(elevationSpectrum_, 0, sizeof(elevationSpectrum_));
-  memset(a1_, 0, sizeof(a1_)); memset(b1_, 0, sizeof(b1_));
+  memset(elevationSpectrum_, 0, HALF * sizeof(float));
+  memset(a1_, 0, HALF * sizeof(float)); memset(b1_, 0, HALF * sizeof(float));
   if (a2_) memset(a2_, 0, HALF * sizeof(float));
   if (b2_) memset(b2_, 0, HALF * sizeof(float));
 }
@@ -150,12 +167,9 @@ void WaveAnalyzer::loadChannel(float *buffer, int oldest, int start) {
 bool WaveAnalyzer::process() {
   if (!readyToProcess()) return false;
 
-  static float Sxx[HALF], Syy[HALF], Szz[HALF];
-  static float Cxy[HALF], Qzx[HALF], Qzy[HALF];
-  static float Xr[HALF], Xi[HALF], Yr[HALF], Yi[HALF], Zr[HALF], Zi[HALF];
-  memset(Sxx, 0, sizeof(Sxx)); memset(Syy, 0, sizeof(Syy));
-  memset(Szz, 0, sizeof(Szz)); memset(Cxy, 0, sizeof(Cxy));
-  memset(Qzx, 0, sizeof(Qzx)); memset(Qzy, 0, sizeof(Qzy));
+  memset(sxx_, 0, HALF * sizeof(float)); memset(syy_, 0, HALF * sizeof(float));
+  memset(szz_, 0, HALF * sizeof(float)); memset(cxy_, 0, HALF * sizeof(float));
+  memset(qzx_, 0, HALF * sizeof(float)); memset(qzy_, 0, HALF * sizeof(float));
 
   double windowPower = 0;
   for (int i = 0; i < N; ++i) {
@@ -168,48 +182,63 @@ bool WaveAnalyzer::process() {
   for (int start = 0; start + N <= bufferSize();
        start += SwimConfig::FFT_STEP) {
     loadChannel(waveAx_, oldest, start);
-    for (int k = 0; k < HALF; ++k) { Xr[k] = fftReal_[k]; Xi[k] = fftImag_[k]; }
+    for (int k = 0; k < HALF; ++k) { xr_[k] = fftReal_[k]; xi_[k] = fftImag_[k]; }
     loadChannel(waveAy_, oldest, start);
-    for (int k = 0; k < HALF; ++k) { Yr[k] = fftReal_[k]; Yi[k] = fftImag_[k]; }
+    for (int k = 0; k < HALF; ++k) { yr_[k] = fftReal_[k]; yi_[k] = fftImag_[k]; }
     loadChannel(waveAz_, oldest, start);
-    for (int k = 0; k < HALF; ++k) { Zr[k] = fftReal_[k]; Zi[k] = fftImag_[k]; }
+    for (int k = 0; k < HALF; ++k) { zr_[k] = fftReal_[k]; zi_[k] = fftImag_[k]; }
 
     const float norm = 2.0f / (SwimConfig::WAVE_RATE_HZ * windowPower);
     for (int k = 1; k < HALF; ++k) {
-      Sxx[k] += norm * (Xr[k] * Xr[k] + Xi[k] * Xi[k]);
-      Syy[k] += norm * (Yr[k] * Yr[k] + Yi[k] * Yi[k]);
-      Szz[k] += norm * (Zr[k] * Zr[k] + Zi[k] * Zi[k]);
-      Cxy[k] += norm * (Xr[k] * Yr[k] + Xi[k] * Yi[k]);
-      Qzx[k] += norm * (Zi[k] * Xr[k] - Zr[k] * Xi[k]);
-      Qzy[k] += norm * (Zi[k] * Yr[k] - Zr[k] * Yi[k]);
+      sxx_[k] += norm * (xr_[k] * xr_[k] + xi_[k] * xi_[k]);
+      syy_[k] += norm * (yr_[k] * yr_[k] + yi_[k] * yi_[k]);
+      szz_[k] += norm * (zr_[k] * zr_[k] + zi_[k] * zi_[k]);
+      cxy_[k] += norm * (xr_[k] * yr_[k] + xi_[k] * yi_[k]);
+      qzx_[k] += norm * (zi_[k] * xr_[k] - zr_[k] * xi_[k]);
+      qzy_[k] += norm * (zi_[k] * yr_[k] - zr_[k] * yi_[k]);
     }
     segments++;
   }
   if (!segments) return false;
 
+  // Circular mean avoids a false zero when roll crosses -180/+180 degrees.
+  double sumRollSin = 0, sumRollCos = 0, sumPitch = 0;
+  for (int i = 0; i < bufferSize(); ++i) {
+    sumRollSin += sinf(roll_[i]);
+    sumRollCos += cosf(roll_[i]);
+    sumPitch += pitch_[i];
+  }
+  results_.meanRollDeg = atan2(sumRollSin, sumRollCos) * RAD_TO_DEG;
+  results_.meanPitchDeg = (sumPitch / bufferSize()) * RAD_TO_DEG;
+
   double m0 = 0, m2 = 0;
   double meanDirectionA = 0, meanDirectionB = 0;
-  float peakEnergy = 0;
-  int peakBin = -1;
+  float rawPeakEnergy = 0;
+  int rawPeakBin = -1;
   for (int k = 1; k < HALF; ++k) {
-    Sxx[k] /= segments; Syy[k] /= segments; Szz[k] /= segments;
-    Cxy[k] /= segments; Qzx[k] /= segments; Qzy[k] /= segments;
+    sxx_[k] /= segments; syy_[k] /= segments; szz_[k] /= segments;
+    cxy_[k] /= segments; qzx_[k] /= segments; qzy_[k] /= segments;
     const float f = k * DF;
     const float omega2 = sq(2.0f * PI * f);
-    elevationSpectrum_[k] = Szz[k] / (omega2 * omega2);
-    const float horizontal = Sxx[k] + Syy[k];
-    const float firstDenom = sqrtf(Szz[k] * horizontal);
-    a1_[k] = firstDenom > 1e-12f ? Qzx[k] / firstDenom : 0;
-    b1_[k] = firstDenom > 1e-12f ? Qzy[k] / firstDenom : 0;
-    a2_[k] = horizontal > 1e-12f ? (Sxx[k] - Syy[k]) / horizontal : 0;
-    b2_[k] = horizontal > 1e-12f ? 2.0f * Cxy[k] / horizontal : 0;
+    // Fourth-order high-pass power response suppresses attitude/bias drift
+    // which otherwise explodes after the acceleration-to-elevation f^-4 step.
+    const float ratio = f / SwimConfig::DRIFT_HIGHPASS_HZ;
+    const float ratio4 = ratio * ratio * ratio * ratio;
+    const float highPassPower = (ratio4 * ratio4) / (1.0f + ratio4 * ratio4);
+    elevationSpectrum_[k] = szz_[k] / (omega2 * omega2) * highPassPower;
+    const float horizontal = sxx_[k] + syy_[k];
+    const float firstDenom = sqrtf(szz_[k] * horizontal);
+    a1_[k] = firstDenom > 1e-12f ? qzx_[k] / firstDenom : 0;
+    b1_[k] = firstDenom > 1e-12f ? qzy_[k] / firstDenom : 0;
+    a2_[k] = horizontal > 1e-12f ? (sxx_[k] - syy_[k]) / horizontal : 0;
+    b2_[k] = horizontal > 1e-12f ? 2.0f * cxy_[k] / horizontal : 0;
     if (f >= SwimConfig::PARAM_FMIN_HZ && f <= SwimConfig::FMAX_HZ) {
       const float s = elevationSpectrum_[k];
       m0 += s * DF;
       m2 += f * f * s * DF;
       meanDirectionA += a1_[k] * s * DF;
       meanDirectionB += b1_[k] * s * DF;
-      if (s > peakEnergy) { peakEnergy = s; peakBin = k; }
+      if (s > rawPeakEnergy) { rawPeakEnergy = s; rawPeakBin = k; }
     }
   }
 
@@ -223,10 +252,34 @@ bool WaveAnalyzer::process() {
   } else {
     results_.meanDirectionFromDeg = NAN;
   }
-  const int firstParameterBin = (int)ceilf(SwimConfig::PARAM_FMIN_HZ / DF);
-  results_.lowFrequencyEdgePeak = peakBin > 0 && peakBin <= firstParameterBin + 1;
+  // Tp uses a slightly safer band and a three-bin smoother. Hs/Tm02 still use
+  // the wider parameter band above. This prevents the old 20.48 s edge bin
+  // from masking a real wave peak while retaining an explicit QC flag.
+  const int firstPeakBin = (int)ceilf(SwimConfig::PEAK_FMIN_HZ / DF);
+  const int lastPeakBin = min(HALF - 2, (int)floorf(SwimConfig::FMAX_HZ / DF));
+  auto smoothed = [&](int k) {
+    return 0.25f * elevationSpectrum_[k - 1] +
+           0.50f * elevationSpectrum_[k] +
+           0.25f * elevationSpectrum_[k + 1];
+  };
+  float peakEnergy = 0;
+  int peakBin = -1;
+  for (int k = max(1, firstPeakBin); k <= lastPeakBin; ++k) {
+    const float energy = smoothed(k);
+    if (energy > peakEnergy) { peakEnergy = energy; peakBin = k; }
+  }
+  results_.lowFrequencyEdgePeak = rawPeakBin > 0 && rawPeakBin < firstPeakBin;
   if (peakBin > 0) {
-    results_.peakFrequencyHz = peakBin * DF;
+    const float left = smoothed(peakBin - 1);
+    const float center = smoothed(peakBin);
+    const float right = smoothed(peakBin + 1);
+    const float denominator = left - 2.0f * center + right;
+    float offset = fabsf(denominator) > 1e-20f
+                       ? constrain(0.5f * (left - right) / denominator,
+                                   -0.5f, 0.5f)
+                       : 0.0f;
+    if (peakBin == firstPeakBin && offset < 0) offset = 0;
+    results_.peakFrequencyHz = (peakBin + offset) * DF;
     results_.peakPeriodS = 1.0f / results_.peakFrequencyHz;
     float from = atan2f(b1_[peakBin], a1_[peakBin]) * RAD_TO_DEG + 180.0f;
     while (from < 0) from += 360;

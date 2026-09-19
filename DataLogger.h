@@ -7,17 +7,18 @@
 
 class DataLogger {
  public:
+  enum class Backend : uint8_t { NONE, MICRO_SD, INTERNAL_FFAT };
   enum class Status : uint8_t {
     NOT_STARTED,
+    NO_STORAGE,
     WAITING_DATA,
     OK,
-    MOUNT_FAILED,
     OPEN_FAILED,
     WRITE_FAILED,
     STORAGE_FULL,
   };
 
-  /// Mounts the SPI microSD and prepares the logger without creating a session file.
+  /// Selects microSD when available, otherwise mounts internal FFat.
   bool begin();
   /// Stores the active wave-window size for the next file header.
   void setWaveBufferSize(uint32_t samples) { waveBufferSize_ = samples; }
@@ -44,7 +45,7 @@ class DataLogger {
   Status status() const { return status_; }
   /// Returns a compact display label for the logger state.
   const char *statusText() const;
-  /// Returns the microSD capacity captured at mount time.
+  /// Returns the active storage capacity captured at mount time.
   size_t totalBytes() const { return totalBytes_; }
   /// Returns the latest measured free-space percentage.
   uint8_t freePercent() const;
@@ -52,6 +53,13 @@ class DataLogger {
   bool storageLow() const;
   /// Reports whether logging stopped because storage is full.
   bool storageFull() const { return status_ == Status::STORAGE_FULL; }
+  /// True when acquisition is intentionally running without a usable card.
+  bool disabled() const { return status_ == Status::NO_STORAGE; }
+  /// Returns the selected storage backend and its user-facing name.
+  Backend backend() const { return backend_; }
+  const char *backendName() const;
+  /// Gives the Wi-Fi portal access to the same mounted filesystem.
+  fs::FS *storage() const { return storage_; }
   /// Flushes buffered data and the active file.
   bool flush();
   /// Renames a numeric session file once valid UTC becomes available.
@@ -69,12 +77,16 @@ class DataLogger {
   bool flushBuffer();
   /// Writes the fixed binary header for a new session.
   bool writeFileHeader();
+  /// Recomputes free space for the active backend.
+  void refreshFreeBytes();
 
   File file_;
+  fs::FS *storage_ = nullptr;
+  Backend backend_ = Backend::NONE;
   bool ready_ = false;
   Status status_ = Status::NOT_STARTED;
   uint32_t lastFlushMs_ = 0;
-  char fileName_[40] = "not-open";
+  char fileName_[40] = "not-started";
   static constexpr size_t WRITE_BUFFER_SIZE = 8192;
   uint8_t writeBuffer_[WRITE_BUFFER_SIZE] = {};
   size_t bufferedBytes_ = 0;

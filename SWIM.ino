@@ -2,6 +2,8 @@
 #include <Wire.h>
 #include <esp32-hal-psram.h>
 #include <esp_timer.h>
+#include <esp_system.h>
+#include <esp_heap_caps.h>
 #include <Preferences.h>
 
 #include "SWIMConfig.h"
@@ -47,6 +49,58 @@ uint32_t imuMissedDeadlines = 0;
 uint32_t imuReadErrors = 0;
 uint32_t imuMaxLatenessUs = 0;
 uint32_t lastImuHealthMs = 0;
+float waveSumAx = 0, waveSumAy = 0, waveSumAz = 0;
+float waveSumRoll = 0, waveSumPitch = 0;
+uint8_t waveDecimationCount = 0;
+int activeImuSda = SwimConfig::I2C_SDA;
+int activeImuScl = SwimConfig::I2C_SCL;
+
+/// Starts the IMU bus without changing the established prototype wiring. If
+/// no device answers on GPIO1/2, also tests accidentally crossed SDA/SCL and
+/// the older T-Display-S3 external-I2C pair used by early SWIM assemblies.
+bool beginImuWithPinFallback() {
+  struct PinPair { int sda; int scl; const char *label; };
+  const PinPair candidates[] = {
+      {SwimConfig::I2C_SDA, SwimConfig::I2C_SCL, "primary"},
+      {SwimConfig::I2C_ALT_SDA, SwimConfig::I2C_ALT_SCL, "prototype-2"},
+      {SwimConfig::I2C_SCL, SwimConfig::I2C_SDA, "primary-swapped"},
+      {43, 44, "legacy"},
+      {44, 43, "legacy-swapped"},
+  };
+  for (const PinPair &pins : candidates) {
+    imuWire.end();
+    delay(50);
+    Serial.printf("IMU BUS: trying %s SDA=GPIO%d SCL=GPIO%d\n",
+                  pins.label, pins.sda, pins.scl);
+    if (!imuWire.begin(pins.sda, pins.scl, 100000)) {
+      Serial.println("IMU BUS: Wire.begin failed");
+      continue;
+    }
+    delay(150);
+    if (imu.begin(imuWire)) {
+      activeImuSda = pins.sda;
+      activeImuScl = pins.scl;
+      return true;
+    }
+    // A responding device with an unsupported identity is useful evidence.
+    // Keep this bus active and do not hide it by probing unrelated pins.
+    if (imu.address() != 0) return false;
+  }
+  return false;
+}
+
+const char *resetReasonText(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "panic/exception";
+    case ESP_RST_INT_WDT: return "interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT: return "other watchdog";
+    case ESP_RST_BROWNOUT: return "brownout / supply dip";
+    default: return "other";
+  }
+}
 
 /// Writes the current GNSS, wave and spectrum snapshot as one summary.
 bool writeCurrentSummary(uint64_t monotonicUs, uint64_t utcMs) {
@@ -70,6 +124,12 @@ void saveMark(uint64_t monotonicUs) {
     const bool enabled = wifi.toggle();
     display.notify(enabled ? "WIFI ON" : "WIFI OFF", enabled ? 0x07FF : 0xDEFB);
     display.draw(waves, gnss, logger, wifi);
+    return;
+  }
+  if (logger.disabled()) {
+    display.notify("NO STORAGE", 0xFFE0);
+    display.draw(waves, gnss, logger, wifi);
+    Serial.println("MARK skipped: no storage backend is available");
     return;
   }
   const bool saved = logger.writeEvent(SwimConfig::EVENT_MARK, monotonicUs,
@@ -108,6 +168,18 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
+  pinMode(SwimConfig::IMU_POWER_PIN, OUTPUT);
+  digitalWrite(SwimConfig::IMU_POWER_PIN, HIGH);
+  delay(SwimConfig::IMU_POWER_STABILIZE_MS);
+  Serial.printf("IMU POWER: GPIO%d=HIGH (3.3 V logic supply)\n",
+                SwimConfig::IMU_POWER_PIN);
+
+  const esp_reset_reason_t resetReason = esp_reset_reason();
+  Serial.printf("BOOT: reset reason=%d (%s), heap=%u internal=%u largest=%u\n",
+                (int)resetReason, resetReasonText(resetReason), ESP.getFreeHeap(),
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
   setCpuFrequencyMhz(SwimConfig::CPU_FREQUENCY_MHZ);
 
   pinMode(SwimConfig::BUTTON_LEFT, INPUT_PULLUP);
@@ -122,22 +194,26 @@ void setup() {
       "test_mode", SwimConfig::DEFAULT_TEST_MODE));
   modePreferences.end();
   if (!waves.begin()) haltWithError("PSRAM ERROR", "Wave buffers unavailable");
+  Serial.printf("MEMORY: wave buffers in PSRAM, heap=%u internal=%u largest=%u, PSRAM free=%u\n",
+                ESP.getFreeHeap(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                ESP.getFreePsram());
 
   display.showBoot("IMU");
-  if (!imuWire.begin(SwimConfig::I2C_SDA, SwimConfig::I2C_SCL, 100000))
-    haltWithError("I2C ERROR", "Wire.begin failed");
-  delay(200);
-  if (!imu.begin(imuWire)) haltWithError("IMU ERROR", "Check scan / WHO_AM_I in Serial");
+  if (!beginImuWithPinFallback())
+    haltWithError("IMU ERROR", "Check pin scan / IDs in Serial");
 
   display.showBoot("GNSS");
   gnss.begin(gpsSerial, SwimConfig::GPS_RX_PIN, SwimConfig::GPS_TX_PIN,
              SwimConfig::GPS_BAUD);
   gnss.configureFiveHz();
 
-  // A failed logger does not stop measurements; the display reports NO LOG.
-  display.showBoot("LOGGER / microSD");
+  // Prefer microSD, but preserve the original internal-FFat logger when the
+  // second prototype has no card fitted.
+  display.showBoot("LOGGER SD / FFat");
   logger.setWaveBufferSize(waves.bufferSize());
-  logger.begin();
+  if (!logger.begin())
+    Serial.println("LOGGER: both storage backends failed; measurements continue without logging");
   display.showBoot("WIFI OFF");
   wifi.begin(logger);
 
@@ -147,7 +223,7 @@ void setup() {
 
   Serial.println("SWIM modular logger started");
   Serial.printf("IMU I2C: SDA=GPIO%d SCL=GPIO%d address=0x%02X model=%s\n",
-                SwimConfig::I2C_SDA, SwimConfig::I2C_SCL,
+                activeImuSda, activeImuScl,
                 imu.address(), imu.modelName());
   Serial.printf("GPS UART: GPS TX -> GPIO%d, GPS RX <- GPIO%d, %lu baud\n",
                 SwimConfig::GPS_RX_PIN, SwimConfig::GPS_TX_PIN,
@@ -155,6 +231,7 @@ void setup() {
   Serial.printf("microSD SPI: CS=%d SCK=%d MISO=%d MOSI=%d\n",
                 SwimConfig::SD_CS, SwimConfig::SD_SCK,
                 SwimConfig::SD_MISO, SwimConfig::SD_MOSI);
+  Serial.printf("Storage backend: %s\n", logger.backendName());
   Serial.printf("IMU %.0f Hz, wave %.0f Hz, buffer %d samples\n",
                 SwimConfig::IMU_RATE_HZ, SwimConfig::WAVE_RATE_HZ,
                 waves.bufferSize());
@@ -239,7 +316,12 @@ void handleButtons(uint64_t monotonicUs) {
           display.draw(waves, gnss, logger, wifi);
           const bool calibrated = imu.calibrateStationary();
           nextImuUs = esp_timer_get_time() + SwimConfig::IMU_PERIOD_US;
-          if (calibrated) waves.reset();
+          if (calibrated) {
+            waves.reset();
+            waveSumAx = waveSumAy = waveSumAz = 0;
+            waveSumRoll = waveSumPitch = 0;
+            waveDecimationCount = 0;
+          }
           if (calibrated) {
             pendingSetZeroEvent = true;
             pendingSetZeroMonotonicUs = esp_timer_get_time();
@@ -281,7 +363,18 @@ void loop() {
     nextImuUs += (uint64_t)(missed + 1) * SwimConfig::IMU_PERIOD_US;
     if (imu.read(latestImu, monotonicUs)) {
       imuHealthSamples++;
-      waves.addImuSample(latestImu.levelAx, latestImu.levelAy, latestImu.levelAz);
+      waveSumAx += latestImu.levelAx; waveSumAy += latestImu.levelAy;
+      waveSumAz += latestImu.levelAz; waveSumRoll += latestImu.rollRad;
+      waveSumPitch += latestImu.pitchRad;
+      if (++waveDecimationCount == SwimConfig::WAVE_DECIMATION) {
+        const float scale = 1.0f / SwimConfig::WAVE_DECIMATION;
+        waves.addImuSample(waveSumAx * scale, waveSumAy * scale,
+                           waveSumAz * scale, waveSumRoll * scale,
+                           waveSumPitch * scale);
+        waveSumAx = waveSumAy = waveSumAz = 0;
+        waveSumRoll = waveSumPitch = 0;
+        waveDecimationCount = 0;
+      }
     } else imuReadErrors++;
   }
 
@@ -323,10 +416,11 @@ void loop() {
       (!waves.results().ready || millis() - lastWaveProcessMs >= waves.updateIntervalMs())) {
     lastWaveProcessMs = millis();
     if (waves.process()) {
-      Serial.printf("Waves: Hs=%.3f m Tp=%.2f s Tm02=%.2f s Dp=%.1f deg Dm=%.1f deg\n",
+      Serial.printf("Waves: Hs=%.3f m Tp=%.2f s Tm02=%.2f s Dp=%.1f deg Dm=%.1f deg mean roll=%+.1f pitch=%+.1f deg\n",
                     waves.results().hsM, waves.results().peakPeriodS,
                     waves.results().tm02S, waves.results().directionFromDeg,
-                    waves.results().meanDirectionFromDeg);
+                    waves.results().meanDirectionFromDeg,
+                    waves.results().meanRollDeg, waves.results().meanPitchDeg);
       if (logger.status() == DataLogger::Status::WAITING_DATA) {
         const uint64_t utcMs = gnss.estimatedUtcMs(monotonicUs);
         if (logger.startSession(utcMs)) {

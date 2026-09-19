@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a SWIM v1 binary log into per-record-type CSV files."""
+"""Convert a SWIM v1/v2/v3 binary log from microSD or FFat to CSV."""
 
 import argparse
 import csv
@@ -14,7 +14,8 @@ GNSS = struct.Struct("<BBBBB3xfddfff")
 WAVES = struct.Struct("<B3x7fIHH")
 TIME_SYNC = struct.Struct("<Q")
 EVENT = struct.Struct("<I")
-SUMMARY = struct.Struct("<B3xdd8f32B32b32b32b32b")
+SUMMARY_V2 = struct.Struct("<B3xdd8f32B32b32b32b32b")
+SUMMARY_V3 = struct.Struct("<B3xdd10f32B32b32b32b32b")
 EVENT_NAMES = {1: "MARK", 2: "SET_ZERO"}
 
 
@@ -27,6 +28,11 @@ def iso_utc(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat(timespec="milliseconds")
 
 
+def one_decimal(value):
+    """Format exported measurements uniformly without changing binary precision."""
+    return f"{value:.1f}" if isinstance(value, float) and math.isfinite(value) else value
+
+
 def main() -> None:
     """Convert one SWIM v1/v2 binary log into per-record CSV files."""
     parser = argparse.ArgumentParser()
@@ -34,6 +40,23 @@ def main() -> None:
     parser.add_argument("--output", type=Path, help="Output prefix; defaults to input stem")
     args = parser.parse_args()
     prefix = args.output or args.log.with_suffix("")
+
+    with args.log.open("rb") as source:
+        raw = source.read(FILE_HEADER.size)
+        if len(raw) != FILE_HEADER.size:
+            raise SystemExit("Truncated SWIM file header")
+        magic, version, header_size, imu_mhz, wave_mhz, fft_size, buffer_size, firmware = FILE_HEADER.unpack(raw)
+        if not magic.startswith(b"SWIMLOG") or version not in (1, 2, 3):
+            raise SystemExit("Not a supported SWIM v1/v2/v3 log")
+
+    spectrum_df = (wave_mhz / 1000.0) / fft_size
+    last_spectrum_bin = math.floor(0.4 / spectrum_df)
+    spectrum_frequencies = [
+        round((round((0.4 * i / 31.0) / spectrum_df) if i else 0) * spectrum_df, 6)
+        for i in range(32)
+    ]
+    spectrum_frequencies = [min(f, last_spectrum_bin * spectrum_df)
+                            for f in spectrum_frequencies]
 
     outputs = {
         1: ("imu", ["monotonic_us", "utc_ms", "utc_iso", "ax_g", "ay_g", "az_g",
@@ -50,9 +73,10 @@ def main() -> None:
         6: ("summary", ["monotonic_us", "utc_ms", "utc_iso", "uart", "time_valid",
              "fix", "waves_ready", "edge_peak", "latitude_deg", "longitude_deg",
              "altitude_m", "sog_mps", "cog_deg", "hs_m", "fp_hz", "tp_s",
-             "tm02_s", "direction_from_deg"] +
-             [f"s_norm_{0.4*i/31:.3f}hz" for i in range(32)] +
-             [f"{name}_{0.4*i/31:.3f}hz" for name in ("a1", "b1", "a2", "b2") for i in range(32)]),
+             "tm02_s", "direction_from_deg", "mean_roll_deg", "mean_pitch_deg"] +
+             [f"s_norm_{f:.3f}hz" for f in spectrum_frequencies] +
+             [f"{name}_{f:.3f}hz" for name in ("a1", "b1", "a2", "b2")
+              for f in spectrum_frequencies]),
     }
     handles = {}
     writers = {}
@@ -65,14 +89,7 @@ def main() -> None:
             writers[kind].writerow(columns)
 
         with args.log.open("rb") as source:
-            raw = source.read(FILE_HEADER.size)
-            if len(raw) != FILE_HEADER.size:
-                raise SystemExit("Truncated SWIM file header")
-            magic, version, header_size, imu_mhz, wave_mhz, fft_size, buffer_size, firmware = FILE_HEADER.unpack(raw)
-            if not magic.startswith(b"SWIMLOG") or version not in (1, 2):
-                raise SystemExit("Not a supported SWIM v1/v2 log")
-            if header_size > FILE_HEADER.size:
-                source.seek(header_size - FILE_HEADER.size, 1)
+            source.seek(header_size)
 
             while True:
                 raw = source.read(RECORD_HEADER.size)
@@ -89,26 +106,32 @@ def main() -> None:
                 prefix_fields = [mono_us, utc_ms or "", iso_utc(utc_ms)]
 
                 if kind == 1 and payload_size == IMU.size:
-                    writers[kind].writerow(prefix_fields + list(IMU.unpack(payload)))
+                    writers[kind].writerow(prefix_fields + [one_decimal(v) for v in IMU.unpack(payload)])
                 elif kind == 2 and payload_size == GNSS.size:
                     flags, quality, used, visible, cn0, hdop, lat, lon, alt, sog, cog = GNSS.unpack(payload)
                     writers[kind].writerow(prefix_fields + [bool(flags & 1), bool(flags & 2),
-                        bool(flags & 4), quality, used, visible, cn0, hdop, lat, lon, alt, sog, cog])
+                        bool(flags & 4), quality, used, visible, cn0] +
+                        [one_decimal(v) for v in (hdop, lat, lon, alt, sog, cog)])
                 elif kind == 3 and payload_size == WAVES.size:
                     values = list(WAVES.unpack(payload))
                     flags = values.pop(0)
-                    writers[kind].writerow(prefix_fields + [bool(flags & 1), bool(flags & 2), bool(flags & 4)] + values)
+                    writers[kind].writerow(prefix_fields + [bool(flags & 1), bool(flags & 2), bool(flags & 4)] +
+                        [one_decimal(v) for v in values])
                 elif kind == 4 and payload_size == TIME_SYNC.size:
                     writers[kind].writerow(prefix_fields + [TIME_SYNC.unpack(payload)[0]])
                 elif kind == 5 and payload_size == EVENT.size:
                     event_code = EVENT.unpack(payload)[0]
                     writers[kind].writerow(prefix_fields + [event_code,
                         EVENT_NAMES.get(event_code, "UNKNOWN")])
-                elif kind == 6 and payload_size == SUMMARY.size:
-                    values = list(SUMMARY.unpack(payload))
+                elif kind == 6 and payload_size in (SUMMARY_V2.size, SUMMARY_V3.size):
+                    summary_struct = SUMMARY_V3 if payload_size == SUMMARY_V3.size else SUMMARY_V2
+                    values = list(summary_struct.unpack(payload))
                     flags = values.pop(0)
+                    if summary_struct is SUMMARY_V2:
+                        values[10:10] = [math.nan, math.nan]
                     writers[kind].writerow(prefix_fields + [bool(flags & 1), bool(flags & 2),
-                        bool(flags & 4), bool(flags & 8), bool(flags & 16)] + values)
+                        bool(flags & 4), bool(flags & 8), bool(flags & 16)] +
+                        [one_decimal(v) for v in values])
 
         print(f"Converted {args.log} using firmware {firmware.rstrip(bytes([0])).decode(errors='replace')}")
     finally:

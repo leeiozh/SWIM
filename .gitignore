@@ -7,17 +7,18 @@ build/
 
 # Local recordings can be large and may contain field metadata
 data/
+logs/
+
+# Reproducible/generated analysis artifacts (scripts and docs remain tracked)
+output/
+outputs/
+analysis/*.html
 
 # Editor and OS files
 .idea/
 .vscode/
 *~
 .DS_Store
-
-# Python caches and reproducible document render scratch
-__pycache__/
-*.py[cod]
-tmp/
 
 # Python caches and reproducible document render scratch
 __pycache__/

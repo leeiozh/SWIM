@@ -35,7 +35,7 @@ class WifiPortal {
 
  private:
   /// Registers HTTP routes once.
-  void configureServer();
+  bool configureServer();
   /// Builds the log-management page.
   String mainPage() const;
   /// Streams one validated binary log.

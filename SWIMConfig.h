@@ -27,6 +27,10 @@ constexpr int POWER_ON = 15;
 constexpr int BUTTON_LEFT = 0;
 constexpr int BUTTON_RIGHT = 14;
 constexpr int BATTERY_ADC = 4;
+// Prototype 2 powers its low-current IMU module from this GPIO because the
+// assembled header has no spare 3V3 contact. Drive HIGH before starting I2C.
+constexpr int IMU_POWER_PIN = 3;
+constexpr uint32_t IMU_POWER_STABILIZE_MS = 300;
 // Empirical BAT_ADC correction against a multimeter on this assembled unit.
 // The divider/ADC reads low, with additional droop under radio load.
 constexpr float BATTERY_BASE_CORRECTION_V = 0.20f;
@@ -40,6 +44,9 @@ constexpr float BATTERY_WIFI_ACTIVE_CORRECTION_V = 0.05f;
 constexpr bool VERTICAL_INSTALLATION = true;
 constexpr int I2C_SDA = 1;
 constexpr int I2C_SCL = 2;
+// Alternate wiring used by prototype 2.
+constexpr int I2C_ALT_SDA = 21;
+constexpr int I2C_ALT_SCL = 16;
 constexpr uint8_t IMU_ADDRESS_LOW = 0x68;
 constexpr uint8_t IMU_ADDRESS_HIGH = 0x69;
 constexpr float IMU_RATE_HZ = 100.0f;
@@ -50,16 +57,20 @@ constexpr int GPS_RX_PIN = 18;  // ESP RX <- GPS TX
 constexpr int GPS_TX_PIN = 17;  // ESP TX -> GPS RX
 constexpr uint32_t GPS_BAUD = 9600;
 
-// Wave processing consumes every IMU sample directly at 100 Hz; no decimation.
-constexpr float WAVE_RATE_HZ = 100.0f;
+// IMU stays at 100 Hz. Adjacent pairs are averaged into a 50 Hz wave stream,
+// restoring the original 81.92 s FFT window and adding simple anti-aliasing.
+constexpr uint8_t WAVE_DECIMATION = 2;
+constexpr float WAVE_RATE_HZ = IMU_RATE_HZ / WAVE_DECIMATION;
 constexpr int FFT_SIZE = 4096;
 constexpr int FFT_STEP = FFT_SIZE / 2;
-constexpr int TEST_WAVE_BUFFER_SIZE = 8192;
-constexpr int FIELD_WAVE_BUFFER_SIZE = 60000;
+constexpr int TEST_WAVE_BUFFER_SIZE = 4096;
+constexpr int FIELD_WAVE_BUFFER_SIZE = 30000;
 constexpr int MAX_WAVE_BUFFER_SIZE = FIELD_WAVE_BUFFER_SIZE;
 constexpr uint32_t TEST_WAVE_UPDATE_MS = 20000UL;
 constexpr uint32_t FIELD_WAVE_UPDATE_MS = 60000UL;
 constexpr float PARAM_FMIN_HZ = 0.04f;
+constexpr float PEAK_FMIN_HZ = 0.06f;
+constexpr float DRIFT_HIGHPASS_HZ = 0.05f;
 constexpr float FMAX_HZ = 0.40f;
 
 constexpr uint32_t DISPLAY_UPDATE_MS = 2000UL;

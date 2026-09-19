@@ -18,7 +18,8 @@ class WaveAnalyzer {
   /// Returns the processing interval for the active mode.
   uint32_t updateIntervalMs() const;
   /// Adds one level-frame acceleration sample.
-  void addImuSample(float levelAx, float levelAy, float levelAz);
+  void addImuSample(float levelAx, float levelAy, float levelAz,
+                    float rollRad, float pitchRad);
   /// Reports whether the active window contains enough samples.
   bool readyToProcess() const;
   /// Computes spectra and wave parameters for the current window.
@@ -58,17 +59,31 @@ class WaveAnalyzer {
   float *waveAx_ = nullptr;
   float *waveAy_ = nullptr;
   float *waveAz_ = nullptr;
+  float *roll_ = nullptr;
+  float *pitch_ = nullptr;
   int writeIndex_ = 0;
   int samplesCollected_ = 0;
   uint32_t resultGeneration_ = 0;
   bool testMode_ = true;
   WaveResults results_;
 
-  static float fftReal_[];
-  static float fftImag_[];
-  static float elevationSpectrum_[];
-  static float a1_[];
-  static float b1_[];
+  float *fftReal_ = nullptr;
+  float *fftImag_ = nullptr;
+  float *elevationSpectrum_ = nullptr;
+  float *a1_ = nullptr;
+  float *b1_ = nullptr;
   float *a2_ = nullptr;
   float *b2_ = nullptr;
+  float *sxx_ = nullptr;
+  float *syy_ = nullptr;
+  float *szz_ = nullptr;
+  float *cxy_ = nullptr;
+  float *qzx_ = nullptr;
+  float *qzy_ = nullptr;
+  float *xr_ = nullptr;
+  float *xi_ = nullptr;
+  float *yr_ = nullptr;
+  float *yi_ = nullptr;
+  float *zr_ = nullptr;
+  float *zi_ = nullptr;
 };

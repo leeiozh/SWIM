@@ -1,5 +1,7 @@
 #include "DataLogger.h"
 
+#include <FFat.h>
+#include <Preferences.h>
 #include <SD.h>
 #include <SPI.h>
 #include <string.h>
@@ -38,15 +40,16 @@ struct __attribute__((packed)) SummaryPayload {
   double latitudeDeg, longitudeDeg;
   float altitudeM, sogMps, cogDeg;
   float hsM, peakFrequencyHz, peakPeriodS, tm02S, directionFromDeg;
+  float meanRollDeg, meanPitchDeg;
   uint8_t spectrum[32];
   int8_t a1[32], b1[32], a2[32], b2[32];
 };
 
 static_assert(sizeof(FileHeader) == 44, "Unexpected SWIM file header layout");
 static_assert(sizeof(RecordHeader) == 20, "Unexpected SWIM record header layout");
-static_assert(sizeof(SummaryPayload) == 212, "Unexpected summary payload layout");
+static_assert(sizeof(SummaryPayload) == 220, "Unexpected summary payload layout");
 
-/// Normalizes an SD entry name to an absolute path.
+/// Normalizes an active-backend entry name to an absolute path.
 String normalizedPath(const char *name) {
   String path = name ? String(name) : String();
   if (!path.startsWith("/")) path = "/" + path;
@@ -54,18 +57,115 @@ String normalizedPath(const char *name) {
 }
 
 /// Checks for an exact path without creating a placeholder file.
-bool listedPathExists(const String &wanted) {
-  return SD.exists(wanted);
+bool listedPathExists(fs::FS &storage, const String &wanted) {
+  return storage.exists(wanted);
 }
 }  // namespace
 
 bool DataLogger::begin() {
+  // Keep CS inactive while the card and the breakout's level shifter power up.
+  // Some inexpensive modules otherwise enter SDIO mode and ignore SPI CMD0.
+  pinMode(SwimConfig::SD_CS, OUTPUT);
+  digitalWrite(SwimConfig::SD_CS, HIGH);
+  pinMode(SwimConfig::SD_MISO, INPUT_PULLUP);
+  delay(500);
+
+  Serial.printf("LOGGER: microSD SPI CS=%d SCK=%d MISO=%d MOSI=%d, idle MISO=%s\n",
+                SwimConfig::SD_CS, SwimConfig::SD_SCK, SwimConfig::SD_MISO,
+                SwimConfig::SD_MOSI,
+                digitalRead(SwimConfig::SD_MISO) == HIGH ? "HIGH" : "LOW");
   SPI.begin(SwimConfig::SD_SCK, SwimConfig::SD_MISO,
             SwimConfig::SD_MOSI, SwimConfig::SD_CS);
-  if (!SD.begin(SwimConfig::SD_CS)) {
-    status_ = Status::MOUNT_FAILED;
-    Serial.println("LOGGER: microSD mount failed; check card, 3.3 V and CS/SCK/MISO/MOSI wiring");
-    return false;
+
+  // Start slowly for long jumper wires and simple breakout boards. Retrying is
+  // useful because a card may still be completing its internal power-up when
+  // the ESP32 reaches setup(). Logging bandwidth is tiny, so 1 MHz is enough.
+  const uint32_t frequencies[] = {400000UL, 1000000UL, 4000000UL};
+  bool mounted = false;
+  uint32_t mountedFrequency = 0;
+  for (uint8_t attempt = 0; attempt < 3 && !mounted; ++attempt) {
+    const uint32_t frequency = frequencies[attempt];
+    if (attempt) {
+      SPI.end();
+      digitalWrite(SwimConfig::SD_CS, HIGH);
+      delay(100);
+      SPI.begin(SwimConfig::SD_SCK, SwimConfig::SD_MISO,
+                SwimConfig::SD_MOSI, SwimConfig::SD_CS);
+    }
+    Serial.printf("LOGGER: SD mount attempt %u at %lu Hz\n",
+                  attempt + 1, (unsigned long)frequency);
+    mounted = SD.begin(SwimConfig::SD_CS, SPI, frequency);
+    if (mounted) {
+      mountedFrequency = frequency;
+      break;
+    }
+    SD.end();
+    digitalWrite(SwimConfig::SD_CS, HIGH);
+    delay(350);
+  }
+  if (mounted && SD.cardType() != CARD_NONE) {
+    const uint8_t cardType = SD.cardType();
+    const char *typeText = cardType == CARD_MMC ? "MMC" :
+                           cardType == CARD_SD ? "SDSC" :
+                           cardType == CARD_SDHC ? "SDHC/SDXC" : "unknown";
+    Serial.printf("LOGGER: microSD mounted at %lu Hz, type=%s, card=%llu MB\n",
+                  (unsigned long)mountedFrequency, typeText,
+                  SD.cardSize() / (1024ULL * 1024ULL));
+
+    // Verify real writes now so a read-only/bad card falls back to FFat.
+    constexpr const char *PROBE_PATH = "/swim_sd_test.tmp";
+    constexpr uint32_t PROBE_VALUE = 0x5344494FUL;
+    if (SD.exists(PROBE_PATH)) SD.remove(PROBE_PATH);
+    File probe = SD.open(PROBE_PATH, FILE_WRITE);
+    bool probeOk = probe &&
+                   probe.write(reinterpret_cast<const uint8_t *>(&PROBE_VALUE),
+                               sizeof(PROBE_VALUE)) == sizeof(PROBE_VALUE);
+    if (probe) { probe.flush(); probe.close(); }
+    uint32_t readBack = 0;
+    if (probeOk) {
+      probe = SD.open(PROBE_PATH, FILE_READ);
+      probeOk = probe &&
+                probe.read(reinterpret_cast<uint8_t *>(&readBack),
+                           sizeof(readBack)) == sizeof(readBack) &&
+                readBack == PROBE_VALUE;
+      if (probe) probe.close();
+    }
+    SD.remove(PROBE_PATH);
+    if (probeOk) {
+      storage_ = &SD;
+      backend_ = Backend::MICRO_SD;
+      Serial.println("LOGGER: microSD write/read test passed; using microSD");
+    } else {
+      Serial.println("LOGGER: microSD write/read test failed; falling back to FFat");
+      SD.end();
+    }
+  } else {
+    Serial.println("LOGGER: no usable microSD; trying internal FFat");
+    SD.end();
+  }
+
+  if (!storage_) {
+    SPI.end();
+    Preferences preferences;
+    preferences.begin("swim", false);
+    const bool wasInitialized = preferences.getBool("ffat_init", false);
+    bool ffatMounted = FFat.begin(false);
+    if (!ffatMounted && !wasInitialized) {
+      Serial.println("LOGGER: first FFat use; formatting internal partition once");
+      ffatMounted = FFat.format(false) && FFat.begin(false);
+    }
+    if (ffatMounted) preferences.putBool("ffat_init", true);
+    preferences.end();
+    if (!ffatMounted) {
+      status_ = Status::NO_STORAGE;
+      strncpy(fileName_, "no-storage", sizeof(fileName_) - 1);
+      Serial.println("LOGGER: neither microSD nor FFat is available; measurements continue without logging");
+      return false;
+    }
+    storage_ = &FFat;
+    backend_ = Backend::INTERNAL_FFAT;
+    Serial.printf("LOGGER: using internal FFat, total=%llu KB free=%llu KB\n",
+                  FFat.totalBytes() / 1024ULL, FFat.freeBytes() / 1024ULL);
   }
 
   // A previous experimental allocator could leave thousands of zero-byte
@@ -75,7 +175,7 @@ bool DataLogger::begin() {
   while (true) {
     String stale[16];
     int staleCount = 0;
-    File cleanupRoot = SD.open("/");
+    File cleanupRoot = storage_->open("/");
     for (File entry = cleanupRoot ? cleanupRoot.openNextFile() : File();
          entry && staleCount < 16; entry = cleanupRoot.openNextFile()) {
       const String path = normalizedPath(entry.name());
@@ -85,17 +185,23 @@ bool DataLogger::begin() {
     cleanupRoot.close();
     if (!staleCount) break;
     for (int i = 0; i < staleCount; ++i) {
-      if (SD.remove(stale[i])) emptyLogsRemoved++;
+      if (storage_->remove(stale[i])) emptyLogsRemoved++;
       delay(0);
     }
   }
   if (emptyLogsRemoved)
     Serial.printf("LOGGER: removed %d empty stale log files\n", emptyLogsRemoved);
 
-  totalBytes_ = SD.totalBytes();
-  freeBytes_ = totalBytes_ > SD.usedBytes() ? totalBytes_ - SD.usedBytes() : 0;
+  if (backend_ == Backend::MICRO_SD) {
+    totalBytes_ = SD.totalBytes();
+  } else {
+    totalBytes_ = FFat.totalBytes();
+  }
+  refreshFreeBytes();
   status_ = Status::WAITING_DATA;
   strncpy(fileName_, "waiting", sizeof(fileName_) - 1);
+  Serial.printf("LOGGER: backend=%s, total=%llu KB free=%llu KB\n",
+                backendName(), totalBytes_ / 1024ULL, freeBytes_ / 1024ULL);
   return true;
 }
 
@@ -110,12 +216,12 @@ bool DataLogger::startSession(uint64_t utcMs) {
     if (gmtime_r(&seconds, &utc) && utc.tm_year >= 120 &&
         strftime(stamp, sizeof(stamp), "%y%m%d_%H%M", &utc)) {
       String target = String("/") + stamp + ".bin";
-      if (listedPathExists(target)) {
+      if (listedPathExists(*storage_, target)) {
         bool found = false;
         for (int suffix = 1; suffix <= 99; ++suffix) {
           target = String("/") + stamp + (suffix < 10 ? "_0" : "_") +
                    String(suffix) + ".bin";
-          if (!listedPathExists(target)) { found = true; break; }
+          if (!listedPathExists(*storage_, target)) { found = true; break; }
         }
         if (!found) target = "";
       }
@@ -130,7 +236,7 @@ bool DataLogger::startSession(uint64_t utcMs) {
   if (!utcNamed_) {
     int highestNumericIndex = -1;
     uint8_t usedNumeric[1250] = {};
-    File root = SD.open("/");
+    File root = storage_->open("/");
     for (File entry = root ? root.openNextFile() : File(); entry;
          entry = root.openNextFile()) {
       String name = normalizedPath(entry.name());
@@ -164,7 +270,7 @@ bool DataLogger::startSession(uint64_t utcMs) {
     snprintf(fileName_, sizeof(fileName_), "/%04d.bin", nextIndex);
   }
 
-  file_ = SD.open(fileName_, FILE_WRITE);
+  file_ = storage_->open(fileName_, FILE_WRITE);
   if (!file_) {
     status_ = Status::OPEN_FAILED;
     Serial.printf("LOGGER: cannot open %s for writing\n", fileName_);
@@ -183,15 +289,15 @@ bool DataLogger::startSession(uint64_t utcMs) {
 bool DataLogger::writeFileHeader() {
   FileHeader header = {};
   memcpy(header.magic, "SWIMLOG", 7);
-  header.formatVersion = 2;
+  header.formatVersion = 3;
   header.headerSize = sizeof(header);
   header.imuRateMilliHz = (uint32_t)(SwimConfig::IMU_RATE_HZ * 1000);
   header.waveRateMilliHz = (uint32_t)(SwimConfig::WAVE_RATE_HZ * 1000);
   header.fftSize = SwimConfig::FFT_SIZE;
   header.waveBufferSize = waveBufferSize_;
-  // Mounting/direction metadata: sensor +X up, +Z toward bow; reported
-  // direction is wave FROM, clockwise from bow.
-  strncpy(header.firmware, "SWIM-XU-ZB-CW", sizeof(header.firmware) - 1);
+  // Instrument frame: X forward/bow, Y right/starboard, Z up. Reported wave
+  // direction is FROM, clockwise from bow.
+  strncpy(header.firmware, "SWIM-XF-YR-ZU", sizeof(header.firmware) - 1);
   if (file_.write((const uint8_t *)&header, sizeof(header)) != sizeof(header)) {
     status_ = Status::WRITE_FAILED;
     file_.close();
@@ -204,12 +310,31 @@ bool DataLogger::writeFileHeader() {
 const char *DataLogger::statusText() const {
   switch (status_) {
     case Status::OK: return "REC";
+    case Status::NO_STORAGE: return "NO STORE";
     case Status::WAITING_DATA: return "WAIT DATA";
-    case Status::MOUNT_FAILED: return "MOUNT FAIL";
     case Status::OPEN_FAILED: return "OPEN FAIL";
     case Status::WRITE_FAILED: return "WRITE FAIL";
     case Status::STORAGE_FULL: return "MEM FULL";
     default: return "NOT READY";
+  }
+}
+
+const char *DataLogger::backendName() const {
+  switch (backend_) {
+    case Backend::MICRO_SD: return "microSD";
+    case Backend::INTERNAL_FFAT: return "FFat";
+    default: return "none";
+  }
+}
+
+void DataLogger::refreshFreeBytes() {
+  if (backend_ == Backend::MICRO_SD) {
+    const size_t used = SD.usedBytes();
+    freeBytes_ = totalBytes_ > used ? totalBytes_ - used : 0;
+  } else if (backend_ == Backend::INTERNAL_FFAT) {
+    freeBytes_ = FFat.freeBytes();
+  } else {
+    freeBytes_ = 0;
   }
 }
 
@@ -238,12 +363,12 @@ bool DataLogger::applyUtcFileName(uint64_t utcMs) {
   char stamp[20];
   if (!strftime(stamp, sizeof(stamp), "%y%m%d_%H%M", &utc)) return false;
   String target = String("/") + stamp + ".bin";
-  if (listedPathExists(target)) {
+  if (listedPathExists(*storage_, target)) {
     bool uniqueNameFound = false;
     for (int suffix = 1; suffix <= 99; ++suffix) {
       target = String("/") + stamp + (suffix < 10 ? "_0" : "_") +
                String(suffix) + ".bin";
-      if (!listedPathExists(target)) { uniqueNameFound = true; break; }
+      if (!listedPathExists(*storage_, target)) { uniqueNameFound = true; break; }
     }
     if (!uniqueNameFound) {
       Serial.println("LOGGER: all UTC filename suffixes are occupied");
@@ -254,9 +379,9 @@ bool DataLogger::applyUtcFileName(uint64_t utcMs) {
   if (!flush()) return false;
   const String oldName(fileName_);
   file_.close();
-  if (!SD.rename(oldName, target)) {
+  if (!storage_->rename(oldName, target)) {
     Serial.printf("LOGGER: rename %s failed; starting new UTC file\n", oldName.c_str());
-    file_ = SD.open(target, FILE_WRITE);
+    file_ = storage_->open(target, FILE_WRITE);
     if (file_ && writeFileHeader()) {
       file_.flush();
       strncpy(fileName_, target.c_str(), sizeof(fileName_) - 1);
@@ -266,12 +391,12 @@ bool DataLogger::applyUtcFileName(uint64_t utcMs) {
       return true;
     }
     file_.close();
-    file_ = SD.open(oldName, FILE_APPEND);
+    file_ = storage_->open(oldName, FILE_APPEND);
     status_ = file_ ? Status::OK : Status::OPEN_FAILED;
     ready_ = (bool)file_;
     return false;
   }
-  file_ = SD.open(target, FILE_APPEND);
+  file_ = storage_->open(target, FILE_APPEND);
   if (!file_) {
     status_ = Status::OPEN_FAILED;
     ready_ = false;
@@ -304,7 +429,7 @@ bool DataLogger::flushBuffer() {
   if (!bufferedBytes_) return true;
   if (file_.write(writeBuffer_, bufferedBytes_) != bufferedBytes_) {
     ready_ = false;
-    freeBytes_ = totalBytes_ > SD.usedBytes() ? totalBytes_ - SD.usedBytes() : 0;
+    refreshFreeBytes();
     status_ = freeBytes_ <= SwimConfig::STORAGE_STOP_FREE_BYTES
                   ? Status::STORAGE_FULL : Status::WRITE_FAILED;
     Serial.println("LOGGER: buffered write failed");
@@ -333,6 +458,8 @@ bool DataLogger::writeSummary(const GnssData &g, const WaveResults &w,
   p.peakPeriodS = w.peakPeriodS;
   p.tm02S = w.tm02S;
   p.directionFromDeg = w.directionFromDeg;
+  p.meanRollDeg = w.meanRollDeg;
+  p.meanPitchDeg = w.meanPitchDeg;
   memcpy(p.spectrum, spectrum, 32);
   memcpy(p.a1, a1, 32); memcpy(p.b1, b1, 32);
   memcpy(p.a2, a2, 32); memcpy(p.b2, b2, 32);
@@ -363,7 +490,7 @@ void DataLogger::update() {
 
 void DataLogger::checkStorage() {
   if (!ok()) return;
-  freeBytes_ = totalBytes_ > SD.usedBytes() ? totalBytes_ - SD.usedBytes() : 0;
+  refreshFreeBytes();
   if (freeBytes_ <= SwimConfig::STORAGE_STOP_FREE_BYTES) {
     flushBuffer();
     file_.flush();

@@ -48,6 +48,8 @@ struct WaveResults {
   float tm02S = NAN;
   float directionFromDeg = NAN;
   float meanDirectionFromDeg = NAN;
+  float meanRollDeg = NAN;
+  float meanPitchDeg = NAN;
   uint32_t sampleCount = 0;
 
 };

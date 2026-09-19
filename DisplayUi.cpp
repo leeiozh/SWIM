@@ -150,14 +150,15 @@ void DisplayUi::drawWavePage(const WaveAnalyzer &waves, const DataLogger &logger
   gfx_->setTextSize(2); gfx_->setTextColor(C_CYAN); gfx_->setCursor(8, 8);
   gfx_->println("SWIM WAVES");
   const bool waitingForData = logger.status() == DataLogger::Status::WAITING_DATA;
+  const bool noStorage = logger.disabled();
   gfx_->setTextSize(1);
   gfx_->setCursor(8, 34);
   if (logger.ok()) {
     gfx_->setTextColor(C_RED); gfx_->print("REC ");
     gfx_->setTextColor(C_CYAN); gfx_->print(logger.fileName());
   } else {
-    gfx_->setTextColor(waitingForData ? C_YELLOW : C_RED);
-    gfx_->print(waitingForData ? "WAIT DATA" : "NO LOG");
+    gfx_->setTextColor((waitingForData || noStorage) ? C_YELLOW : C_RED);
+    gfx_->print(noStorage ? "NO STORAGE" : (waitingForData ? "WAIT DATA" : "NO LOG"));
   }
 
   if (!w.ready) {
@@ -179,10 +180,16 @@ void DisplayUi::drawWavePage(const WaveAnalyzer &waves, const DataLogger &logger
     gfx_->print("Dp "); gfx_->print(w.directionFromDeg, 0);
     const int degreeX = gfx_->getCursorX() + 3;
     gfx_->drawCircle(degreeX, 161, 3, C_GREEN);
+    gfx_->setCursor(92, 160); gfx_->print("R "); gfx_->print(w.meanRollDeg, 0);
+    const int rollDegreeX = gfx_->getCursorX() + 3;
+    gfx_->drawCircle(rollDegreeX, 161, 3, C_GREEN);
     gfx_->setTextColor(C_WHITE); gfx_->setCursor(8, 190);
     gfx_->print("Dm "); gfx_->print(w.meanDirectionFromDeg, 0);
     const int meanDegreeX = gfx_->getCursorX() + 3;
     gfx_->drawCircle(meanDegreeX, 191, 3, C_WHITE);
+    gfx_->setCursor(92, 190); gfx_->print("P "); gfx_->print(w.meanPitchDeg, 0);
+    const int pitchDegreeX = gfx_->getCursorX() + 3;
+    gfx_->drawCircle(pitchDegreeX, 191, 3, C_WHITE);
     if (w.lowFrequencyEdgePeak) {
       gfx_->setTextSize(1); gfx_->setTextColor(C_YELLOW); gfx_->setCursor(8, 218);
       gfx_->print("LOW-F DRIFT / EDGE PEAK");
@@ -454,13 +461,15 @@ void DisplayUi::drawDataPage(const DataLogger &logger, const WifiPortal &wifi,
     gfx_->print(label); gfx_->setTextColor(color); gfx_->setCursor(66, y);
     gfx_->print(value);
   };
-  saveRow(52, "Logger", logger.statusText(), logger.ok() ? C_GREEN : C_RED);
+  saveRow(52, "Logger", logger.statusText(),
+          logger.ok() ? C_GREEN : (logger.disabled() ? C_YELLOW : C_RED));
   const char *shownFile = logger.fileName();
   if (shownFile[0] == '/') ++shownFile;
   saveRow(74, "File", shownFile, C_WHITE);
   snprintf(text, sizeof(text), "%lu KB", (unsigned long)(logger.fileSize() / 1024));
   saveRow(96, "Size", text, C_WHITE);
-  if (logger.totalBytes()) snprintf(text, sizeof(text), "%u%% free", logger.freePercent());
+  if (logger.totalBytes()) snprintf(text, sizeof(text), "%s %u%% free",
+                                    logger.backendName(), logger.freePercent());
   else snprintf(text, sizeof(text), "--");
   saveRow(112, "Storage", text, !logger.totalBytes() || logger.storageFull() ? C_RED :
                                       (logger.storageLow() ? C_YELLOW : C_GREEN));
